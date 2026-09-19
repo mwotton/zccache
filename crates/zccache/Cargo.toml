@@ -201,7 +201,26 @@ tracing-subscriber = { workspace = true, optional = true }
 # only be made by whoever declares the dependency -- which is now kernal-api,
 # and it pins `=0.9.4`. If that pin ever regresses below 0.9.3 the aarch64
 # Windows release lane breaks here, so it is a facade-side constraint now.
-kernal-api = { workspace = true, features = ["fs", "ipc", "daemon-identity"] }
+# The published facade must declare the UNION of the kernal-api features
+# every internal crate enables: `ci/publish_amalgamate.py` copies their
+# source into this crate, so a feature only one of them turned on still
+# has to be on here. A missing entry compiles fine in the workspace and
+# only fails at `cargo package` verify time, i.e. during the release --
+# that is how 1.14.4 failed to publish. The guard
+# `test_facade_kernal_api_features_cover_internal_crates` in
+# ci/tests/test_publish_amalgamate.py keeps this list in step.
+kernal-api = { workspace = true, features = [
+    "broker-client",
+    "crash",
+    "daemon-frame-v1",
+    "daemon-identity",
+    "daemon-registration",
+    "daemon-registration-v2",
+    "fs",
+    "fs-watch",
+    "ipc",
+    "ipc-async",
+] }
 # Only for the `mimalloc-allocator` re-export (soldr#3053); pinned to the same
 # exact version kernal-api declares so the graph holds one mimalloc.
 mimalloc-pprof = { version = "=0.9.4", optional = true }
