@@ -1,3 +1,17 @@
+# #1608 Windows-only DLL integration fixtures
+
+- [x] Verify that the failing DLL fixtures use Windows-only source/compiler assumptions while portable cache-native tests remain in the same module.
+- [x] Gate only the three DLL fixtures on Windows; retain all portable executable and compiler-driver test coverage.
+- [x] Validate the Linux ignored-test selector, formatting, test compilation, warnings-denied checks, and local review. Linux cache-native selector: 40 passed / 0 failed after excluding separately tracked #1609 PCH tests; Windows cache-native target compiles with warnings denied.
+- [ ] Record results, commit/push/open the focused PR, and leave the branch clean.
+
+## Review — #1608
+
+- **Root cause:** three `__declspec(dllexport)`/`.dll` fixtures were selected by Linux `--ignored` runs even though they require a Windows compiler environment.
+- **Fix:** apply `#[cfg(windows)]` only to the three DLL fixture tests. Portable executable and compiler-driver coverage in the same module stays active on Linux.
+- **Validation:** Linux cache-native integration selector 40 passed / 0 failed (excluding #1609); Windows `cache_native` test target warnings-denied check and local cache-native Clippy pass.
+- **Review:** medium local code review found no correctness findings.
+
 # Pin kernal-api from crates.io (drop `_vender/kernal-api`) — done
 
 Goal: `feat/complete-kernal-integration` depends on a published, exact
