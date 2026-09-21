@@ -62,6 +62,39 @@ class KeyboardInterruptBehaviorTests(unittest.TestCase):
             finally:
                 watcher.stop()
 
+    def test_poll_predicate_keyboard_interrupt_notifies_main_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            file_path = root / "watch.cpp"
+            file_path.write_text("a\n")
+            called = []
+            watcher = FileWatcher(
+                root,
+                include_globs=["**/*.cpp"],
+                debounce_seconds=0.05,
+                poll_interval=0.05,
+                notification_predicate=lambda *args, **kwargs: (_ for _ in ()).throw(
+                    KeyboardInterrupt()
+                ),
+            )
+            with mock.patch.object(
+                _thread, "interrupt_main", side_effect=lambda: called.append(True)
+            ):
+                try:
+                    time.sleep(0.2)
+                    file_path.write_text("b\n")
+                    deadline = time.time() + 2.0
+                    while time.time() < deadline and not called:
+                        time.sleep(0.05)
+                    # Give the dispatch exception handler time to reveal a
+                    # duplicate notification before lifting the mock.
+                    time.sleep(0.1)
+                finally:
+                    # Keep the process-wide interrupt mocked until the
+                    # dispatch thread has joined, even on a slow CI host.
+                    watcher.stop()
+                self.assertEqual(called, [True])
+
     def test_keyboard_interrupt_stop_logs_once_per_watcher(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
