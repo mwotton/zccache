@@ -177,6 +177,59 @@ async fn handle_clear_preserves_in_flight_private_staging() {
     .await;
 }
 
+/// Regression (shared CI daemon, 2026-09-23): the DashMap hydration loader
+/// raced the detached `ArtifactStoreLoader` and read the store before its
+/// `load_from_disk` landed. `load_all()` came back empty, the legacy `.meta`
+/// migration found nothing, and `artifacts_loaded` was published with the
+/// live DashMap permanently empty — the restarted daemon reported
+/// `Artifacts: 0` over a fully populated on-disk cache and served no warm
+/// hits from it. Hydration must fill the hole itself, not trust the race.
+///
+/// Calls the synchronous hydration unit directly: driving it through the
+/// spawned loader task would depend on blocking-pool scheduling, which the
+/// full nextest suite saturates (the original failure class this test
+/// exists to pin is itself a scheduling race).
+#[tokio::test]
+async fn startup_hydration_reads_index_blob_even_when_store_loader_has_not_run() {
+    let endpoint = crate::ipc::unique_test_endpoint();
+    let tmp = tempfile::tempdir().unwrap();
+    let cache_dir = crate::core::NormalizedPath::new(tmp.path());
+    let mut server = DaemonServer::bind_with_cache_dir(&endpoint, &cache_dir).unwrap();
+
+    // Persist a warm row to the on-disk blob WITHOUT hydrating the
+    // running store — the exact state of a daemon bound to a warm
+    // cache before the background store loader has completed.
+    let key = "5".repeat(64);
+    let meta =
+        ArtifactIndex::new(vec!["warm.o".to_string()], vec![21], Vec::new(), Vec::new(), 0);
+    let index_path = crate::core::config::index_path_from_cache_dir(&cache_dir);
+    let persisted = crate::artifact::ArtifactStore::open_empty(&index_path);
+    persisted.insert(&key, &meta);
+    persisted.flush().unwrap();
+
+    assert!(
+        server.state.artifact_store.get(&key).is_none(),
+        "precondition: the running store must not hold the row yet"
+    );
+    assert!(!server
+        .state
+        .artifact_store_loaded
+        .load(std::sync::atomic::Ordering::Acquire));
+
+    let loaded = super::super::run::hydrate_artifacts_from_store(&server.state);
+
+    assert_eq!(loaded, 1, "the on-disk row must be reported as hydrated");
+    assert!(
+        server.state.artifacts.contains_key(&key),
+        "startup hydration must populate the DashMap from the on-disk \
+         index blob even when the store loader has not run yet"
+    );
+    assert!(server
+        .state
+        .artifact_store_loaded
+        .load(std::sync::atomic::Ordering::Acquire));
+}
+
 #[tokio::test]
 async fn handle_clear_cannot_be_overtaken_by_delayed_startup_hydration() {
     crate::test_support::test_timeout(async {

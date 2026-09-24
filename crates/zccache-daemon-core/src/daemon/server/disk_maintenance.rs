@@ -538,6 +538,7 @@ struct MaintenancePass<'a> {
 fn refresh_live_access(
     scanned: &mut [DiskArtifact],
     artifacts: &DashMap<String, CachedArtifact>,
+    artifact_store: &ArtifactStore,
     dep_graph: &DepGraph,
     now: SystemTime,
 ) {
@@ -567,6 +568,24 @@ fn refresh_live_access(
             // Legacy artifacts keep the existing in-process-only behavior.
             artifact.recently_published |= access.published_in_process
                 || (artifact.staged && age(now, published_at) <= HARD_PRESSURE_MIN_AGE);
+        } else if let Some(meta) = artifact_store.get(&artifact.key) {
+            // The DashMap is a request-side cache in front of the durable
+            // `artifact_store` index, and the two can legitimately diverge:
+            // a lost startup-hydration race leaves the DashMap empty while
+            // the store holds every persisted row (shared CI daemon,
+            // 2026-09-23: `Artifacts: 0` over a fully populated cache).
+            // Deriving protection only from the DashMap made the whole
+            // warm store look unreferenced to hard-pressure eviction, so
+            // one budget crossing deleted it. The store row is the durable
+            // retention record: its `stored_at_secs` is refreshed by
+            // `Touch` on every hit, so it carries the same recency signal
+            // the DashMap entry would have provided.
+            let published_at = SystemTime::UNIX_EPOCH
+                .checked_add(Duration::from_secs(meta.stored_at_secs))
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            artifact.last_access = artifact.last_access.max(published_at);
+            artifact.recently_published |=
+                artifact.staged && age(now, published_at) <= HARD_PRESSURE_MIN_AGE;
         }
     }
 }
@@ -659,7 +678,7 @@ fn maintain_disk_artifacts_with_barrier(
     let now = environment.now();
     let initial_space = environment.filesystem_space(artifact_dir)?;
     let mut scanned = scan_artifacts(artifact_dir)?;
-    refresh_live_access(&mut scanned, artifacts, dep_graph, now);
+    refresh_live_access(&mut scanned, artifacts, artifact_store, dep_graph, now);
     let usage_before = scanned.iter().fold(pending_write_bytes, |total, artifact| {
         total.saturating_add(artifact.allocated_bytes)
     });
@@ -689,7 +708,7 @@ fn maintain_disk_artifacts_with_barrier(
             // under the writer so a hit/publication that raced the scan is
             // not evicted as stale.
             let _publication_guard = publication_barrier.blocking_write();
-            refresh_live_access(&mut scanned, artifacts, dep_graph, now);
+            refresh_live_access(&mut scanned, artifacts, artifact_store, dep_graph, now);
             let commit_space = environment.filesystem_space(artifact_dir)?;
             let commit_plan = plan_maintenance_at_least(
                 policy,
@@ -733,7 +752,7 @@ fn maintain_disk_artifacts_with_barrier(
             removed.insert(key);
         }
         scanned = scan_artifacts(artifact_dir)?;
-        refresh_live_access(&mut scanned, artifacts, dep_graph, now);
+        refresh_live_access(&mut scanned, artifacts, artifact_store, dep_graph, now);
     }
 
     let usage_after = scanned.iter().fold(pending_write_bytes, |total, artifact| {
