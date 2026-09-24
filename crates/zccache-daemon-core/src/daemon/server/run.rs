@@ -893,6 +893,54 @@ fn forced_completion_stalled(
     items_removed == 0 && !completion_had_candidates && metadata_entries == 0
 }
 
+/// Fill the live artifacts DashMap from the durable store, filling the
+/// store itself from disk first if the background store loader has not run.
+///
+/// Synchronously callable unit so the startup-race regression test does not
+/// depend on blocking-pool scheduling (the full nextest suite saturates the
+/// pool and can starve a spawned closure past the per-test timeout).
+pub(super) fn hydrate_artifacts_from_store(state: &SharedState) -> usize {
+    // The store's on-disk hydration is owned by the detached
+    // `ArtifactStoreLoader` (entry.rs, #784 phase 2d) — it is NOT guaranteed
+    // to have run before this call. If this loader observed the store before
+    // that loader's `load_from_disk` landed, `load_all()` returned an empty
+    // map, the legacy `.meta` migration below found nothing, and
+    // `artifacts_loaded` was published with the live DashMap permanently
+    // empty: the restarted daemon then reported `Artifacts: 0` over a fully
+    // populated on-disk cache and served no warm hits from it (shared CI
+    // daemon, 2026-09-23). `load_from_disk` is idempotent and converges with
+    // the background loader (both insert equivalent rows), so fill the hole
+    // here instead of trusting the race.
+    if !state.artifact_store_loaded.load(Ordering::Acquire) {
+        if let Err(error) = state.artifact_store.load_from_disk() {
+            tracing::warn!(
+                %error,
+                "artifact index disk read failed during startup DashMap hydration"
+            );
+        }
+        state.artifact_store_loaded.store(true, Ordering::Release);
+    }
+    // Load the in-memory index that the store now holds from the on-disk
+    // blob (either loaded above or by the background loader that won the
+    // race).
+    let entries = state.artifact_store.load_all();
+    if !entries.is_empty() {
+        let count = entries.len();
+        for (key, meta) in entries {
+            state
+                .artifacts
+                .entry(key)
+                .or_insert_with(|| CachedArtifact::from_index(meta));
+        }
+        count
+    } else {
+        // Migration: legacy `.meta` files predate the current bincode
+        // index blob; populate the live store from them
+        // so the first session after upgrade still has its warm cache.
+        migrate_meta_files(&state.artifact_dir, &state.artifacts, &state.artifact_store)
+    }
+}
+
 /// Start index hydration with publication ownership acquired before spawn.
 /// The optional gate is a deterministic test seam for Clear/startup races.
 pub(super) async fn spawn_artifact_loader(
@@ -906,32 +954,10 @@ pub(super) async fn spawn_artifact_loader(
         if let Some(gate) = start_gate {
             gate.notified().await;
         }
-        let artifact_dir = state.artifact_dir.clone();
         let state_ref = Arc::clone(&state);
         let loaded = kernal_api::async_engine::launch_blocking(move || {
             let _publication_guard = publication_guard;
-            // Load the in-memory index that `ArtifactStore::open` already
-            // hydrated from the on-disk blob.
-            let entries = state_ref.artifact_store.load_all();
-            if !entries.is_empty() {
-                let count = entries.len();
-                for (key, meta) in entries {
-                    state_ref
-                        .artifacts
-                        .entry(key)
-                        .or_insert_with(|| CachedArtifact::from_index(meta));
-                }
-                count
-            } else {
-                // Migration: legacy `.meta` files predate the current bincode
-                // index blob; populate the live store from them
-                // so the first session after upgrade still has its warm cache.
-                migrate_meta_files(
-                    &artifact_dir,
-                    &state_ref.artifacts,
-                    &state_ref.artifact_store,
-                )
-            }
+            hydrate_artifacts_from_store(&state_ref)
         })
         .await
         .unwrap_or(0);

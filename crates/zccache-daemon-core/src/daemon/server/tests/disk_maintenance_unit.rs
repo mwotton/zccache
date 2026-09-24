@@ -449,6 +449,65 @@ fn issue_1191_hard_pressure_preserves_seconds_old_artifacts() {
     assert!(plan.selected.is_empty());
 }
 
+/// A staged generation whose DashMap entry is missing must still inherit
+/// publication protection from its durable `artifact_store` row.
+///
+/// Regression context (shared CI daemon, 2026-09-23): a lost startup
+/// hydration race left `state.artifacts` permanently empty while the store
+/// held every persisted row. `refresh_live_access` derived protection only
+/// from the DashMap, so the first hard-pressure pass treated the entire
+/// warm store as unreferenced candidates and deleted it.
+#[test]
+fn lost_dashmap_hydration_still_protects_staged_generation_via_store_row() {
+    let now = SystemTime::UNIX_EPOCH + 100 * DAY;
+    let dir = tempfile::tempdir().unwrap();
+    let key = "b".repeat(64);
+    crate::artifact::layout_fixtures::seed_staged_generation(
+        dir.path(),
+        &key,
+        &[b"payload bytes"],
+    );
+    let mut scanned = scan_artifacts(dir.path()).unwrap();
+    let staged: Vec<&mut DiskArtifact> = scanned
+        .iter_mut()
+        .filter(|entry| entry.staged && entry.key == key)
+        .collect();
+    assert_eq!(staged.len(), 1, "fixture must scan as one staged artifact");
+
+    // Empty DashMap (the lost-race state); the durable store row is fresh.
+    let artifacts: DashMap<String, CachedArtifact> = DashMap::new();
+    let store = ArtifactStore::open_empty(&dir.path().join("index.bin"));
+    let mut meta = crate::artifact::ArtifactIndex::new(
+        vec!["output.o".to_string()],
+        vec![13],
+        Vec::new(),
+        Vec::new(),
+        0,
+    );
+    meta.stored_at_secs = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        - 2;
+    store.insert(&key, &meta);
+
+    refresh_live_access(&mut scanned, &artifacts, &store, &DepGraph::new(), now);
+
+    let scanned_entry = scanned
+        .iter()
+        .find(|entry| entry.key == key)
+        .expect("scanned entry");
+    assert!(
+        scanned_entry.recently_published,
+        "a fresh durable store row must protect the staged generation \
+         even when the DashMap lost hydration"
+    );
+    assert!(
+        scanned_entry.last_access >= now - Duration::from_secs(2),
+        "the store row's recency must feed the LRU ordering"
+    );
+}
+
 #[test]
 fn issue_1148_private_publication_temps_are_never_cache_entries() {
     let root = tempfile::tempdir().unwrap();
