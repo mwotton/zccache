@@ -55,6 +55,9 @@ clang = { workspace = true }
 rkyv = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 regex = { workspace = true }
+# Reaping reparented orphan children (orphan_reap, ghr-rz7): waitpid(-1, WNOHANG)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 # daemon-entry / test-support
 clap = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }

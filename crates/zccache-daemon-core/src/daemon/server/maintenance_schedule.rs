@@ -34,6 +34,8 @@ const DEPGRAPH_SAVE_INTERVAL: Duration = Duration::from_secs(300);
 const IDLE_WATCHDOG_INTERVAL: Duration = Duration::from_secs(60);
 /// Poll period for private-daemon owner-PID liveness.
 const PRIVATE_DAEMON_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// Period between reparented-orphan reap passes (ghr-rz7).
+const ORPHAN_REAP_INTERVAL: Duration = Duration::from_secs(30);
 
 pub(super) const TASK_STAGED_TEMP_SWEEP: &str = "staged-temp-sweep";
 pub(super) const TASK_MEMORY_EVICTION: &str = "memory-eviction";
@@ -63,6 +65,7 @@ pub(super) fn depgraph_save_due(
 pub(super) const TASK_LEGACY_TEMP_ROOT_CLEANUP: &str = "legacy-temp-root-cleanup";
 pub(super) const TASK_IDLE_WATCHDOG: &str = "idle-watchdog";
 pub(super) const TASK_PRIVATE_DAEMON_OWNERS: &str = "private-daemon-owner-reaper";
+pub(super) const TASK_ORPHAN_REAP: &str = "orphan-reap";
 
 fn launch_maintenance_blocking<F, R>(
     runtime_handle: Option<&kernal_api::async_engine::RuntimeHandle>,
@@ -137,6 +140,13 @@ pub(super) const MAINTENANCE_TASKS: &[MaintenanceTaskSpec] = &[
          embedded service's owner is the process it lives in, so the condition \
          is unreachable and the shutdown it triggers would be a host-visible \
          self-kill",
+    ),
+    MaintenanceTaskSpec::standalone_only(
+        TASK_ORPHAN_REAP,
+        "reaps reparented orphan children while the standalone daemon is its \
+         container's PID 1 (ghr-rz7). An embedded host shares this process with \
+         its own supervisor, so a waitpid(-1) drain here could consume the \
+         host's children's exit statuses",
     ),
 ];
 
@@ -272,6 +282,7 @@ impl MaintenanceSchedule {
                 started.push(self.start_idle_watchdog());
             }
             started.push(self.start_private_daemon_owner_reaper());
+            started.push(self.start_orphan_reap());
         }
 
         // Surface the difference rather than leaving it implicit: a mode that
@@ -486,6 +497,41 @@ impl MaintenanceSchedule {
         })
         .detach();
         TASK_IDLE_WATCHDOG
+    }
+
+    /// Reap reparented orphan children (ghr-rz7).
+    ///
+    /// The standalone daemon is its container's PID 1, so processes it never
+    /// spawned (a healthcheck probe's child whose shell was killed at the
+    /// probe timeout) reparent to it on exit and stay zombies forever — every
+    /// wait path here is pid-targeted and none of them reaps a stranger.
+    /// Zombie PIDs are a finite namespace resource: ~1,600 accumulated in 33
+    /// hours on the shared CI daemon, one per timed-out probe.
+    ///
+    /// The session gate is the safety property: every child the daemon spawns
+    /// for a request belongs to a client session whose pidfd/`waitid` wait
+    /// owns that child's exit status. Draining while any session is active
+    /// could consume that status first and wedge the compile, so the drain
+    /// only runs when no session exists.
+    fn start_orphan_reap(&self) -> &'static str {
+        let state = Arc::clone(&self.state);
+        self.spawn(async move {
+            loop {
+                kernal_api::async_engine::sleep(ORPHAN_REAP_INTERVAL).await;
+                if state.shutdown_requested.load(Ordering::Acquire) {
+                    break;
+                }
+                if state.sessions.active_count() != 0 {
+                    continue;
+                }
+                let reaped = crate::daemon::orphan_reap::drain_orphaned_children();
+                if reaped > 0 {
+                    tracing::info!(reaped, "reaped reparented orphan children");
+                }
+            }
+        })
+        .detach();
+        TASK_ORPHAN_REAP
     }
 
     fn start_private_daemon_owner_reaper(&self) -> &'static str {

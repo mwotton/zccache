@@ -30,6 +30,9 @@ pub mod lineage;
 /// library is also built by hosts that install their own subscriber.
 #[cfg(feature = "daemon-entry")]
 pub mod log_sink;
+/// Reaping reparented orphan children of the daemon process (zombie hygiene,
+/// ghr-rz7). The drain itself is unix-only inside the module.
+pub(crate) mod orphan_reap;
 pub(crate) mod process;
 pub mod server;
 pub mod side_effect;
