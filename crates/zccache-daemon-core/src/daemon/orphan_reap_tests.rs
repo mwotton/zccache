@@ -40,7 +40,7 @@ fn proc_gone(pid: libc::pid_t) -> bool {
 #[test]
 fn drain_reaps_orphans_without_disturbing_live_children() {
     // A child that is still running is untouched by a drain round.
-    let mut live = std::process::Command::new("sleep")
+    let live = std::process::Command::new("sleep")
         .arg("30")
         .spawn()
         .expect("spawn sleep");

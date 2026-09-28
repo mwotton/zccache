@@ -462,11 +462,7 @@ fn lost_dashmap_hydration_still_protects_staged_generation_via_store_row() {
     let now = SystemTime::UNIX_EPOCH + 100 * DAY;
     let dir = tempfile::tempdir().unwrap();
     let key = "b".repeat(64);
-    crate::artifact::layout_fixtures::seed_staged_generation(
-        dir.path(),
-        &key,
-        &[b"payload bytes"],
-    );
+    crate::artifact::layout_fixtures::seed_staged_generation(dir.path(), &key, &[b"payload bytes"]);
     let mut scanned = scan_artifacts(dir.path()).unwrap();
     let staged: Vec<&mut DiskArtifact> = scanned
         .iter_mut()

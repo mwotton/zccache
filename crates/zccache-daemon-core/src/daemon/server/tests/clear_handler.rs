@@ -194,14 +194,19 @@ async fn startup_hydration_reads_index_blob_even_when_store_loader_has_not_run()
     let endpoint = crate::ipc::unique_test_endpoint();
     let tmp = tempfile::tempdir().unwrap();
     let cache_dir = crate::core::NormalizedPath::new(tmp.path());
-    let mut server = DaemonServer::bind_with_cache_dir(&endpoint, &cache_dir).unwrap();
+    let server = DaemonServer::bind_with_cache_dir(&endpoint, &cache_dir).unwrap();
 
     // Persist a warm row to the on-disk blob WITHOUT hydrating the
     // running store — the exact state of a daemon bound to a warm
     // cache before the background store loader has completed.
     let key = "5".repeat(64);
-    let meta =
-        ArtifactIndex::new(vec!["warm.o".to_string()], vec![21], Vec::new(), Vec::new(), 0);
+    let meta = ArtifactIndex::new(
+        vec!["warm.o".to_string()],
+        vec![21],
+        Vec::new(),
+        Vec::new(),
+        0,
+    );
     let index_path = crate::core::config::index_path_from_cache_dir(&cache_dir);
     let persisted = crate::artifact::ArtifactStore::open_empty(&index_path);
     persisted.insert(&key, &meta);
