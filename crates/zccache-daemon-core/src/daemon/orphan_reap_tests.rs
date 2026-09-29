@@ -5,6 +5,7 @@
 //! process. The assertions live in one sequential test, and the repository
 //! suite runs serially.
 
+#[cfg(target_os = "linux")]
 use super::drain_orphaned_children;
 
 /// The `/proc` state character for `pid`, when its entry still exists.
