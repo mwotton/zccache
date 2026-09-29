@@ -4191,6 +4191,7 @@ dependencies = [
  "console-subscriber",
  "dashmap",
  "kernal-api",
+ "libc",
  "prost",
  "rayon",
  "regex",

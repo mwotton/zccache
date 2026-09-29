@@ -58,6 +58,10 @@ regex = { workspace = true }
 # daemon-entry / test-support
 clap = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
+# Reaping reparented orphan children (orphan_reap, ghr-rz7): waitpid(-1, WNOHANG).
+# A table header claims every row below it, so this table must stay last.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 zccache-test-support = { workspace = true }
